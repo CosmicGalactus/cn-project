@@ -1,0 +1,19 @@
+{
+  "name": "dns-server",
+  "version": "1.0.0",
+  "description": "Local DNS server for CN project",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "check": "node connectivity-check.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "dns2": "^2.1.0",
+    "nodemon": "^3.1.14"
+  }
+}
