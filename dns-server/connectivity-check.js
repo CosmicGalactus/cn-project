@@ -1,48 +1,66 @@
-import dns2 from "dns2";
+import dgram from "dgram";
+import fs from "fs";
 import net from "net";
+import path from "path";
+import { fileURLToPath } from "url";
 
-// ====================================================
-//  Configuration
-// ====================================================
-const DNS_PORT = 1053;
-const DNS_HOST = "127.0.0.1";
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const config = JSON.parse(fs.readFileSync(path.resolve(__dirname, "../network-config.json"), "utf8"));
 
-const MACHINES = {
-  "M1 (Shreshtha)": { hostname: "m1.cnproject.local", ip: "10.7.8.86" },
-  "M2 (Prakhar)":   { hostname: "m2.cnproject.local", ip: "10.7.28.103" },
-  "M3 (Soumen)":    { hostname: "m3.cnproject.local", ip: "10.7.6.34" },
-};
+const DNS_HOST = process.env.DNS_HOST || "127.0.0.1";
+const DNS_PORT = Number(process.env.DNS_PORT || 1053);
+const DOMAIN = config.domain || "team1.test";
 
-const SERVICES = {
-  "BackendA (M2:5001)": { hostname: "backenda.cnproject.local", ip: "10.7.28.103", port: 5001 },
-  "BackendB (M3:5002)": { hostname: "backendb.cnproject.local", ip: "10.7.6.34",   port: 5002 },
-};
+function buildQuery(hostname, id = 0x1234) {
+  const header = Buffer.alloc(12);
+  header.writeUInt16BE(id, 0);
+  header.writeUInt16BE(0x0100, 2);
+  header.writeUInt16BE(1, 4);
 
-// ====================================================
-//  Utilities
-// ====================================================
-const dns = new dns2({
-  nameServers: [`${DNS_HOST}`],
-  port: DNS_PORT,
-});
+  const labels = hostname.split(".").map((label) => {
+    const b = Buffer.from(label, "utf8");
+    return Buffer.concat([Buffer.from([b.length]), b]);
+  });
+  const qtail = Buffer.alloc(4);
+  qtail.writeUInt16BE(1, 0);
+  qtail.writeUInt16BE(1, 2);
 
-async function resolveDNS(hostname) {
-  try {
-    const result = await dns.resolveA(hostname);
-    if (result.answers.length > 0) {
-      return { ok: true, ip: result.answers[0].address };
-    }
-    return { ok: false, error: "No A record returned" };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
+  return Buffer.concat([header, ...labels, Buffer.from([0]), qtail]);
 }
 
-function checkTCPPort(ip, port, timeoutMs = 3000) {
+function resolveDNS(hostname, timeoutMs = 2000) {
+  return new Promise((resolve) => {
+    const client = dgram.createSocket("udp4");
+    const timer = setTimeout(() => {
+      client.close();
+      resolve({ ok: false, error: "DNS timeout" });
+    }, timeoutMs);
+
+    client.on("message", (msg) => {
+      clearTimeout(timer);
+      client.close();
+      if (msg.length >= 16 && msg.readUInt16BE(6) > 0) {
+        const ip = msg.subarray(msg.length - 4);
+        resolve({ ok: true, ip: `${ip[0]}.${ip[1]}.${ip[2]}.${ip[3]}` });
+      } else {
+        resolve({ ok: false, error: "No A record returned" });
+      }
+    });
+
+    client.on("error", (err) => {
+      clearTimeout(timer);
+      client.close();
+      resolve({ ok: false, error: err.message });
+    });
+
+    client.send(buildQuery(hostname), DNS_PORT, DNS_HOST);
+  });
+}
+
+function checkTCPPort(ip, port, timeoutMs = 2000) {
   return new Promise((resolve) => {
     const socket = new net.Socket();
     socket.setTimeout(timeoutMs);
-
     socket.on("connect", () => {
       socket.destroy();
       resolve({ ok: true });
@@ -55,82 +73,43 @@ function checkTCPPort(ip, port, timeoutMs = 3000) {
       socket.destroy();
       resolve({ ok: false, error: err.message });
     });
-
     socket.connect(port, ip);
   });
 }
 
-// ====================================================
-//  Main Check
-// ====================================================
 async function main() {
-  console.log(`\n🔍 ═══════════════════════════════════════════════════════`);
-  console.log(`    DNS & Connectivity Check`);
-  console.log(`    DNS Server: ${DNS_HOST}:${DNS_PORT}`);
-  console.log(`   ═══════════════════════════════════════════════════════\n`);
+  console.log(`\n🔍 CN Project Check | DNS=${DNS_HOST}:${DNS_PORT} | Domain=${DOMAIN}\n`);
+  const machines = config.machines || {};
+  const expectedEdgeIp = machines[config.activeEdge || "m2"]?.ip;
 
-  // --------------------------------------------------
-  //  1. DNS Resolution Checks
-  // --------------------------------------------------
-  console.log(`📡 DNS Resolution Checks:`);
-  console.log(`   ─────────────────────────────────────────────────────`);
+  const dnsTargets = [
+    ["App Entry", `app.${DOMAIN}`, expectedEdgeIp],
+    ["API Entry", `api.${DOMAIN}`, expectedEdgeIp],
+    ...Object.entries(machines).map(([k, v]) => [`${k.toUpperCase()} (${v.name.split(" ")[0]})`, `${k}.${DOMAIN}`, v.ip]),
+    ["BackendA", `backenda.${DOMAIN}`, machines.m4?.ip],
+    ["BackendB", `backendb.${DOMAIN}`, machines.m3?.ip],
+  ];
 
-  let allDnsOk = true;
-  for (const [label, { hostname, ip: expectedIp }] of Object.entries(MACHINES)) {
-    const result = await resolveDNS(hostname);
-    if (result.ok && result.ip === expectedIp) {
-      console.log(`   ✅ ${label.padEnd(20)} ${hostname.padEnd(30)} → ${result.ip}`);
-    } else if (result.ok) {
-      console.log(`   ⚠️  ${label.padEnd(20)} ${hostname.padEnd(30)} → ${result.ip} (expected ${expectedIp})`);
-      allDnsOk = false;
-    } else {
-      console.log(`   ❌ ${label.padEnd(20)} ${hostname.padEnd(30)} → FAILED: ${result.error}`);
-      allDnsOk = false;
-    }
+  for (const [label, host, expected] of dnsTargets) {
+    const res = await resolveDNS(host);
+    if (res.ok && res.ip === expected) console.log(`✅ ${label.padEnd(18)} ${host.padEnd(24)} → ${res.ip}`);
+    else if (res.ok) console.log(`⚠️  ${label.padEnd(18)} ${host.padEnd(24)} → ${res.ip} (expected ${expected})`);
+    else console.log(`❌ ${label.padEnd(18)} ${host.padEnd(24)} → ${res.error}`);
   }
 
-  // Also check service hostnames
-  for (const [label, { hostname, ip: expectedIp }] of Object.entries(SERVICES)) {
-    const result = await resolveDNS(hostname);
-    if (result.ok && result.ip === expectedIp) {
-      console.log(`   ✅ ${label.padEnd(20)} ${hostname.padEnd(30)} → ${result.ip}`);
-    } else if (result.ok) {
-      console.log(`   ⚠️  ${label.padEnd(20)} ${hostname.padEnd(30)} → ${result.ip} (expected ${expectedIp})`);
-      allDnsOk = false;
-    } else {
-      console.log(`   ❌ ${label.padEnd(20)} ${hostname.padEnd(30)} → FAILED: ${result.error}`);
-      allDnsOk = false;
-    }
+  console.log();
+  const ports = [
+    ["Backend B (Local)", "127.0.0.1", config.ports?.backendB || 5002],
+    ["Backend B (LAN)", machines.m3?.ip, config.ports?.backendB || 5002],
+    ["Backend A (Rishav)", machines.m4?.ip, config.ports?.backendA || 5001],
+    ["Edge HTTPS (Prakhar)", machines.m2?.ip, config.ports?.https || 443],
+  ];
+  for (const [label, ip, port] of ports) {
+    if (!ip) continue;
+    const res = await checkTCPPort(ip, port);
+    console.log(res.ok ? `✅ ${label.padEnd(22)} ${ip}:${port} → REACHABLE` : `ℹ️  ${label.padEnd(22)} ${ip}:${port} → ${res.error}`);
   }
   console.log();
-
-  // --------------------------------------------------
-  //  2. IP Reachability (TCP ping to backend ports)
-  // --------------------------------------------------
-  console.log(`🔌 Backend Service Connectivity:`);
-  console.log(`   ─────────────────────────────────────────────────────`);
-
-  for (const [label, { ip, port }] of Object.entries(SERVICES)) {
-    const result = await checkTCPPort(ip, port);
-    if (result.ok) {
-      console.log(`   ✅ ${label.padEnd(25)} ${ip}:${port}  → REACHABLE`);
-    } else {
-      console.log(`   ❌ ${label.padEnd(25)} ${ip}:${port}  → UNREACHABLE (${result.error})`);
-    }
-  }
-
-  // --------------------------------------------------
-  //  3. Summary
-  // --------------------------------------------------
-  console.log(`\n   ═══════════════════════════════════════════════════════`);
-  if (allDnsOk) {
-    console.log(`   ✅ All DNS records resolved correctly!`);
-  } else {
-    console.log(`   ⚠️  Some DNS records had issues — check above.`);
-  }
-  console.log(`   ═══════════════════════════════════════════════════════\n`);
-
-  process.exit(0);
 }
 
 main();

@@ -1,12 +1,13 @@
 {
   "name": "dns-server",
   "version": "1.0.0",
-  "description": "Local DNS server for CN project",
+  "description": "Zero-dependency local Primary & Backup DNS server for CN project",
   "main": "index.js",
   "type": "module",
   "scripts": {
     "start": "node index.js",
-    "dev": "nodemon index.js",
+    "primary": "DNS_ROLE=primary node index.js",
+    "backup": "DNS_ROLE=backup node index.js",
     "check": "node connectivity-check.js"
   },
   "keywords": [],
