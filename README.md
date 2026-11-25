@@ -1,199 +1,326 @@
-# CN Project — Distributed DNS, Services, and Secure Reverse Proxy
+# CN Project — Distributed DNS, Load-Balanced Backends, and Secure Reverse Proxy
 
-A three-machine Computer Networks project that demonstrates service discovery, network reachability, load balancing, and HTTPS delivery on a local network. The system combines a custom DNS server with two independent Express backends and an Nginx reverse proxy.
+A four-machine Computer Networks project (Phase 1 + Phase 2) demonstrating custom DNS resolution, HTTPS delivery, HTTP/2 load balancing, high-availability failover, service isolation, and controlled DNS cutover — all running on a local LAN without any cloud dependency.
 
-## Objective
+---
 
-Build and validate a small distributed service environment in which machines can be reached by meaningful hostnames, backend services remain independently deployable, and client traffic can be served securely through a single HTTPS entry point.
+## Team
 
-## What the project demonstrates
+| Machine | Member | Role |
+|---------|--------|------|
+| **M1** | Shrestha Gupta | Primary DNS Server + Test Client |
+| **M2** | Prakhar Shrivastava | Primary Edge Reverse Proxy (Nginx + TLS + LB) |
+| **M3** | Soumen Dass | Backend Server B + Backup DNS Server |
+| **M4** | Rishav Devan | Backend Server A + Standby Edge + Test Client |
 
-- Custom UDP DNS resolution for machine and service hostnames
-- Two Express backends exposed to the local network
-- TCP connectivity checks for both backend services
-- Nginx reverse proxying and upstream load balancing
-- HTTP-to-HTTPS redirection and TLS configuration
-- Basic cache and response-identification headers for observing backend behavior
+---
 
 ## Architecture
 
-```text
-                         DNS queries (UDP :1053)
-  Client / verifier ──────────────────────────────► M1: Custom DNS server
-       │                                               │
-       │ HTTPS (:443)                                  ├─ m2.cnproject.local → M2
-       ▼                                               └─ m3.cnproject.local → M3
- M2: Nginx reverse proxy
-       │
-       ├────────────────────────► BackendA on M2 (:5001)
-       └────────────────────────► BackendB on M3 (:5002)
+```
+                        ┌─────────────────────────────────────────────┐
+                        │         DNS Layer (UDP :53)                  │
+                        │  Primary DNS (M1)  ←→  Backup DNS (M3)      │
+                        │  TTL = 30s | Hot-reload from network-config  │
+                        └───────────────┬─────────────────────────────┘
+                                        │ app.team1.test → M2 (Primary)
+                                        │                 M4 (Standby, Ext E)
+                        ┌───────────────▼─────────────────────────────┐
+                        │       Edge Layer (HTTP:80 → HTTPS:443)       │
+                        │  Primary Nginx (M2)  ←→  Standby Nginx (M4) │
+                        │  TLS 1.2/1.3 | Local CA | HTTP/2             │
+                        │  Round-robin LB | max_fails=2 fail_timeout=10s│
+                        └──────────┬────────────────────┬─────────────┘
+                                   │                    │
+              ┌────────────────────▼──┐    ┌────────────▼──────────────────┐
+              │  Backend A (M4 :5001) │    │  Backend B (M3 :5002)         │
+              │  X-Backend: A         │    │  X-Backend: B                 │
+              │  pf firewall isolated │    │  pf firewall isolated         │
+              └───────────────────────┘    └───────────────────────────────┘
 ```
 
-## Machine responsibilities
+---
 
-| Machine | Owner | IP address | Work completed | Services |
-| --- | --- | --- | --- | --- |
-| **M1** | Shreshtha | `10.7.8.86` | Defined the project DNS zone, hostname records, and the DNS/connectivity verification workflow. | Custom DNS server on UDP `1053` |
-| **M2** | Prakhar | `10.7.28.103` | Implemented BackendA and configured Nginx as the HTTPS entry point, reverse proxy, and load-balancing layer. | Express BackendA on `5001`; Nginx on `80`/`443` |
-| **M3** | Soumen | `10.7.6.34` | Implemented BackendB as the second network-accessible service in the backend pool. | Express BackendB on `5002` |
+## Phase 1 — What Was Built
 
-> The IP addresses above are the lab-network addresses used for this project. Update the DNS records, connectivity-check configuration, and Nginx upstream configuration if your network uses different addresses.
+| Task | Description | Status |
+|------|-------------|--------|
+| **Private LAN** | 4 Macs on same Wi-Fi, all reachable via `ping` | ✅ |
+| **Custom DNS** | UDP DNS server resolving `.test` hostnames on port 53 (TTL 30s) | ✅ |
+| **Backend A** | Express server on `0.0.0.0:5001` with `X-Backend: A`, `/api/status`, `304` caching | ✅ |
+| **Backend B** | Express server on `0.0.0.0:5002` with `X-Backend: B`, `/api/status`, `304` caching | ✅ |
+| **Nginx Edge** | HTTPS reverse proxy with HTTP→HTTPS redirect, TLS 1.2/1.3, round-robin LB | ✅ |
+| **HTTP Caching** | `Cache-Control: public, max-age=60` + ETag → `304 Not Modified` demo | ✅ |
+| **Local CA + TLS** | Self-signed Local CA (`ca.crt`) trusted on client Macs — no `curl -k` needed | ✅ |
 
-## DNS records
+---
 
-The DNS server provides A records for both machines and services:
+## Phase 2 — Extensions Built & Live-Tested
 
-| Hostname | Address | Purpose |
-| --- | --- | --- |
-| `m1.cnproject.local` / `shreshtha.cnproject.local` | `10.7.8.86` | DNS server machine |
-| `m2.cnproject.local` / `prakhar.cnproject.local` | `10.7.28.103` | Nginx and BackendA machine |
-| `m3.cnproject.local` / `soumen.cnproject.local` | `10.7.6.34` | BackendB machine |
-| `backenda.cnproject.local` | `10.7.28.103` | BackendA service |
-| `backendb.cnproject.local` | `10.7.6.34` | BackendB service |
+### Extension A — Backup DNS (Failover DNS)
+- **What:** A second DNS server (`DNS_ROLE=backup`) runs on M3 (Soumen's Mac) alongside Backend B.
+- **Demo:** Primary DNS (M1) is stopped → Client Mac still resolves `app.team1.test` using Backup DNS (M3).
+- **Key:** Both servers read from the same `network-config.json` — zero config duplication.
 
-## Repository layout
+### Extension B — DNS TTL & Controlled Change
+- **What:** All DNS records carry `TTL=30s`. Changing `activeEdge` in `network-config.json` on the DNS server takes effect without restart (hot-reload on every query).
+- **Demo:** `app.team1.test` resolves to `10.7.2.62` (Primary Edge M2) → change `activeEdge` from `"m2"` to `"m4"` → flush DNS cache → `app.team1.test` now resolves to `10.7.26.82` (Standby Edge M4). Change back after demo.
+- **Live Result:** `dig @10.7.3.54 app.team1.test +short` → `10.7.26.82` ✅
 
-```text
+### Extension C — Service Isolation (pf Firewall)
+- **What:** macOS `pf` firewall rules on M3 and M4 restrict backend ports (`:5002` and `:5001` respectively) to allow ONLY the Primary Edge IP (`10.7.2.62`) — all direct client connections are silently dropped.
+- **Demo:** Firewall enabled on M3 → Rishav (M4) tries `curl http://10.7.24.85:5002/api/status` → `Connection timed out` (blocked!) ✅
+- **Commands:** `soumen-pf.sh enable/status/rollback` and `rishav-pf.sh enable/status/rollback`
+
+### Extension D — High Availability Failover + Recovery
+- **What:** Nginx upstream configured with `max_fails=2 fail_timeout=10s` and `proxy_next_upstream error timeout http_502 http_503 http_504`. When one backend goes down, Nginx automatically routes 100% traffic to the healthy backend. When it recovers, load balancing resumes.
+- **Demo:** Backend A stopped → 4/4 requests return `x-backend: B` ✅ → Backend A restarted → requests return `x-backend: A` and `x-backend: B` alternating ✅
+
+### Extension E — Standby Edge + DNS Cutover
+- **What:** A fully configured Standby Nginx (same `nginx.conf`, same TLS cert chain) is kept ready on M4. DNS cutover (`activeEdge: "m2"` → `"m4"`) + DNS cache flush instantly re-routes all traffic to the Standby Edge — no cert changes, no nginx restart on clients.
+- **Demo:** `app.team1.test` → M2 (Primary) → change `activeEdge` → `app.team1.test` → M4 (Standby). Restored after demo.
+
+---
+
+## Repository Structure
+
+```
 cn-project/
-├── dns-server/
-│   ├── index.js                 # UDP DNS server and A-record mappings
-│   └── connectivity-check.js    # DNS and backend TCP verification utility
+├── network-config.json          ← Single source of truth: IPs, domain, ports, roles
+│
+├── shared/
+│   └── backendServer.js         ← Shared Express backend factory (A & B both use this)
+│
 ├── backendA/
-│   └── index.js                 # Express service for M2, port 5001
+│   └── index.js                 ← Backend A (M4 - Rishav, :5001)
+│
 ├── backendB/
-│   └── index.js                 # Express service for M3, port 5002
-└── nginx/
-    ├── nginx.conf               # HTTPS reverse-proxy and backend pool config
-    └── ssl/                     # TLS certificate and private-key files
+│   └── index.js                 ← Backend B (M3 - Soumen, :5002)
+│
+├── dns-server/
+│   ├── index.js                 ← Zero-dependency UDP DNS (Primary + Backup, port 53)
+│   ├── connectivity-check.js    ← DNS + TCP reachability verification utility
+│   └── package.json
+│
+├── nginx/
+│   ├── generate-nginx-conf.sh   ← Auto-generates nginx.conf from network-config.json
+│   ├── generate-certs.sh        ← Generates Local CA + *.team1.test TLS certificate
+│   ├── nginx.conf               ← Generated Nginx config (do not edit manually)
+│   └── ssl/
+│       ├── ca.crt               ← Local Root CA (trust this on each client Mac)
+│       ├── server.crt           ← TLS cert (SAN: app/api/edge/standby/*.team1.test)
+│       └── server.key           ← TLS private key
+│
+└── firewall/
+    ├── lib-pf.sh                ← Shared pf firewall library
+    ├── soumen-pf.sh             ← Backend B isolation (M3, port :5002)
+    └── rishav-pf.sh             ← Backend A isolation (M4, port :5001)
 ```
 
-## Prerequisites
+---
 
-- Three machines connected to the same network
-- Node.js 18+ and npm on M1, M2, and M3
-- Nginx installed on M2
-- Network/firewall rules that permit UDP `1053`, TCP `5001`, TCP `5002`, TCP `80`, and TCP `443` as appropriate
-- A trusted TLS certificate for the hostname used by Nginx, or a development certificate for local testing
+## Key Design Decisions
 
-## Setup
+| Decision | Reason |
+|----------|--------|
+| `.test` domain (not `.local`) | `.local` conflicts with macOS mDNS (Bonjour) — `.test` is reserved for local testing (RFC 2606) |
+| DNS port `53` (not `1053`) | macOS System DNS only queries port 53 — required for browser + system-wide `curl` demos |
+| `network-config.json` as single source | All components (DNS, Nginx, Firewall) read from one file — IP changes require editing only one file |
+| Zero-dependency DNS (`dgram`) | No `dns2` package needed at runtime — built-in Node.js UDP socket handles full DNS packet parsing |
+| Local CA + cert (not self-signed per-host) | One CA trust per client Mac covers all `.team1.test` subdomains — no `curl -k` ever needed |
+| `max_fails=2 fail_timeout=10s` | Nginx marks a backend down after 2 failures within 10s — fast passive health checks without a separate health-check endpoint |
+| Hot-reload DNS from `network-config.json` | DNS server re-reads config on every query — DNS cutover (Ext E) and TTL demo (Ext B) require zero restarts |
 
-### 1. Prepare all machines
+---
 
-Clone the repository on every participating machine, then install dependencies only for the component that machine runs.
+## Network Topology (IPs used during demo)
 
+| Machine | IP | Ports |
+|---------|----|-------|
+| M1 (Shrestha) | `10.7.3.54` | UDP `53` |
+| M2 (Prakhar) | `10.7.2.62` | TCP `80`, `443` |
+| M3 (Soumen) | `10.7.24.85` | TCP `5002`, UDP `53` |
+| M4 (Rishav) | `10.7.26.82` | TCP `5001`, TCP `443` (standby) |
+
+> These are DHCP-assigned IPs. Update `network-config.json` when IPs change — all other configs update automatically.
+
+---
+
+## Setup (Fresh Start)
+
+### Prerequisites
+- Node.js 18+ on all Macs
+- Nginx (`brew install nginx`) on M2 and M4
+- OpenSSL (pre-installed on macOS)
+- All Macs on the same Wi-Fi / LAN
+
+### Step 1 — Clone & update IPs
 ```bash
 git clone https://github.com/CosmicGalactus/cn-project.git
 cd cn-project
+# Edit network-config.json — update m1..m4 IPs to current Wi-Fi IPs
 ```
 
-### 2. Start the DNS server on M1
+### Step 2 — Generate TLS certs (once, run on M2)
+```bash
+./nginx/generate-certs.sh
+```
+
+### Step 3 — Trust Local CA on each client Mac (M1, M3, M4)
+```bash
+sudo security add-trusted-cert -d -r trustRoot \
+  -k /Library/Keychains/System.keychain "$(pwd)/nginx/ssl/ca.crt"
+```
+
+### Step 4 — Set Wi-Fi DNS on client Macs (M1, M3, M4)
+System Settings → Wi-Fi → Details → DNS → Add:
+- `10.7.3.54` (Primary DNS — M1)
+- `10.7.24.85` (Backup DNS — M3)
+
+### Step 5 — Start all services
+
+**M1 (Shrestha) — Primary DNS:**
+```bash
+cd dns-server && sudo DNS_ROLE=primary DNS_PORT=53 node index.js
+```
+
+**M2 (Prakhar) — Primary Nginx Edge:**
+```bash
+./nginx/generate-nginx-conf.sh --role primary
+sudo nginx -c "$(pwd)/nginx/nginx.conf"
+```
+
+**M3 (Soumen) — Backend B + Backup DNS:**
+```bash
+# Terminal 1
+cd backendB && node index.js
+# Terminal 2
+cd dns-server && sudo DNS_ROLE=backup DNS_PORT=53 node index.js
+```
+
+**M4 (Rishav) — Backend A + Standby Nginx (keep stopped until Ext E demo):**
+```bash
+cd backendA && npm install && node index.js
+# Standby Nginx — only start during Extension E demo:
+# ./nginx/generate-nginx-conf.sh --role standby
+# sudo nginx -c "$(pwd)/nginx/nginx.conf"
+```
+
+---
+
+## Verification Commands
 
 ```bash
-cd dns-server
-npm install
-node index.js
+# DNS resolution check (from any Mac)
+dig @10.7.3.54 app.team1.test +short          # → 10.7.2.62 (Prakhar)
+dig @10.7.24.85 app.team1.test +short         # → 10.7.2.62 (Backup DNS)
+
+# HTTPS + LB check (from Shrestha or Rishav)
+for i in 1 2 3 4; do
+  curl -si https://app.team1.test/api/status | grep -E "HTTP/|x-backend:|x-edge-node:"
+done
+# Expected: HTTP/2 200, x-backend: A, x-backend: B alternating
+
+# Nginx health
+curl -si https://app.team1.test/nginx-health
+
+# 304 Not Modified caching check
+ETAG=$(curl -sI https://app.team1.test/api/cache-demo | awk -F': ' 'tolower($1)=="etag"{print $2}' | tr -d '\r')
+curl -si -H "If-None-Match: $ETAG" https://app.team1.test/api/cache-demo | head -1
+# Expected: HTTP/2 304
+
+# Full DNS + TCP connectivity check
+cd dns-server && DNS_HOST=10.7.3.54 DNS_PORT=53 node connectivity-check.js
 ```
 
-The DNS server listens on UDP port `1053`. Keep this process running while testing the environment.
+---
 
-### 3. Start BackendA on M2
+## Demo Scripts (Phase 2 Extensions)
 
+### Extension A — Backup DNS failover
 ```bash
-cd backendA
-npm install
-node index.js
+# Stop Primary DNS on M1 (Ctrl+C)
+# From any client Mac:
+dig @10.7.24.85 app.team1.test +short   # Backup DNS still resolves!
 ```
 
-BackendA binds to `0.0.0.0:5001`, allowing the other machines on the network to reach it. A successful request returns JSON identifying **M2 / BackendA** and includes the `X-Backend: A` response header.
-
-### 4. Start BackendB on M3
-
+### Extension B — TTL & DNS cache
 ```bash
-cd backendB
-npm install
-node index.js
+# On M1 (Shrestha) or M3 (Soumen) DNS server Mac:
+sed -i '' 's/"activeEdge": "m2"/"activeEdge": "m4"/' network-config.json
+# Flush DNS cache on client Mac:
+sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder
+dig @10.7.3.54 app.team1.test +short   # → 10.7.26.82 (Rishav!)
+# Restore:
+sed -i '' 's/"activeEdge": "m4"/"activeEdge": "m2"/' network-config.json
 ```
 
-BackendB binds to `0.0.0.0:5002`. A successful request returns JSON identifying **M3 / BackendB** and includes the `X-Backend: B` response header.
-
-### 5. Configure and start Nginx on M2
-
-Before starting Nginx, update the certificate paths in `nginx/nginx.conf` so they point to the certificate and key on M2. The supplied configuration:
-
-- redirects HTTP traffic on port `80` to HTTPS;
-- terminates TLS on port `443`;
-- forwards requests to BackendA and BackendB through the `backend_pool` upstream;
-- retries the other backend for eligible upstream errors; and
-- exposes `GET /nginx-health` for a basic proxy health response.
-
-Validate and start Nginx using the commands appropriate for your installation, for example:
-
+### Extension C — Service isolation
 ```bash
-nginx -t -c /absolute/path/to/cn-project/nginx/nginx.conf
-nginx -c /absolute/path/to/cn-project/nginx/nginx.conf
+# On M3 (Soumen):
+sudo ./firewall/soumen-pf.sh enable
+# From M4 (Rishav) — direct hit (blocked!):
+curl -v --connect-timeout 3 http://10.7.24.85:5002/api/status
+# Restore:
+sudo ./firewall/soumen-pf.sh rollback
 ```
 
-## Walkthrough and verification
-
-Run the following checks after all services are running.
-
-### Verify DNS resolution from M1
-
+### Extension D — HA Failover + Recovery
 ```bash
-dig @127.0.0.1 -p 1053 m2.cnproject.local A
-dig @127.0.0.1 -p 1053 backenda.cnproject.local A
-dig @127.0.0.1 -p 1053 backendb.cnproject.local A
+# Stop Backend A on M4 (Ctrl+C), then from any client:
+for i in 1 2 3 4; do curl -si https://app.team1.test/api/status | grep "x-backend:"; done
+# → All x-backend: B
+# Restart Backend A → after ~10s, A and B alternate again
 ```
 
-Each query should return the corresponding address from the DNS records table.
-
-### Run the full connectivity check from M1
-
+### Extension E — Standby Edge DNS cutover
 ```bash
-cd dns-server
-npm run check
+# On M4 (Rishav) — start Standby Nginx:
+sudo nginx -c "$(pwd)/nginx/nginx.conf"
+# On DNS server Mac — point traffic to M4:
+sed -i '' 's/"activeEdge": "m2"/"activeEdge": "m4"/' network-config.json
+sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder
+curl -si https://app.team1.test/nginx-health | grep x-edge-node   # → standby-m4!
+# Restore after demo:
+sed -i '' 's/"activeEdge": "m4"/"activeEdge": "m2"/' network-config.json
+sudo nginx -c "$(pwd)/nginx/nginx.conf" -s stop   # stop standby
 ```
 
-This utility confirms that machine and service hostnames resolve to the expected IPs, then tests TCP reachability to `M2:5001` and `M3:5002`.
+---
 
-### Test the backends directly
+## Concepts Demonstrated
 
-```bash
-curl http://10.7.28.103:5001/
-curl http://10.7.6.34:5002/
-```
+| Concept | Where |
+|---------|-------|
+| UDP DNS protocol (A record, AAAA, NXDOMAIN, NOERROR) | `dns-server/index.js` |
+| DNS TTL and resolver cache | `network-config.json` → `dns.ttl: 30` |
+| TCP 3-way handshake | Every `curl` to backend ports |
+| TLS 1.2/1.3 handshake | Nginx `:443` with Local CA |
+| HTTP/2 multiplexing | `http2 on` in `nginx.conf` |
+| Reverse proxy + load balancing | Nginx `upstream backend_pool` |
+| Passive health checks | `max_fails=2 fail_timeout=10s` |
+| HTTP caching (ETag + 304) | `GET /api/cache-demo` on both backends |
+| `Cache-Control: no-store` | `GET /api/status` — always fresh |
+| Stateless DNS-based failover | Extension E (DNS cutover) |
+| Network-layer firewall (`pf`) | `firewall/soumen-pf.sh`, `rishav-pf.sh` |
+| Hot-config reload (zero downtime) | DNS server re-reads `network-config.json` per query |
 
-The responses should identify BackendA and BackendB respectively.
-
-### Test the HTTPS entry point
-
-Once the client can resolve the M2 hostname through the project DNS configuration, send requests through Nginx:
-
-```bash
-curl -i https://prakhar.cnproject.local/
-curl -i https://prakhar.cnproject.local/nginx-health
-```
-
-For a self-signed development certificate, use `curl -k` only for local testing. Repeated requests to `/` can be inspected through the `X-Backend` header to observe which backend handled a request.
+---
 
 ## Troubleshooting
 
-| Symptom | Likely cause | Resolution |
-| --- | --- | --- |
-| `dig` returns no answer | DNS server is not running or the wrong port is queried. | Start `dns-server/index.js` and query port `1053`. |
-| Connectivity check reports a backend as unreachable | Backend process is stopped, IP is incorrect, or a firewall blocks the port. | Start the correct backend, verify the IP configuration, and allow inbound TCP `5001`/`5002`. |
-| Backend works locally but not from another machine | The service is bound only to localhost or the network blocks traffic. | Confirm it binds to `0.0.0.0` and review firewall rules. |
-| Nginx cannot start | Certificate paths or configuration are invalid. | Update the TLS file paths and run `nginx -t` before starting it. |
-| HTTPS certificate warning | A self-signed or untrusted certificate is in use. | Trust the development CA/certificate or use a certificate trusted by the client. |
+| Symptom | Fix |
+|---------|-----|
+| `curl` SSL error without `-k` | Trust `nginx/ssl/ca.crt` on client Mac via `security add-trusted-cert` |
+| `app.team1.test` does not resolve | Check Wi-Fi DNS settings — must point to M1 (`10.7.3.54`) or M3 (`10.7.24.85`) |
+| `dig` returns old IP after `activeEdge` change | Run `sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder` |
+| Backend shows UNREACHABLE | Check if `node index.js` is running and port not blocked by pf firewall |
+| Nginx fails to start | Run `nginx -t -c "$(pwd)/nginx/nginx.conf"` to check config; ensure `ca.crt` path exists |
+| pf warning "could result in flushing rules" | Normal macOS warning — rules are applied correctly despite the message |
+| Firewall blocks HTTPS too | Only backend ports (`:5001`, `:5002`) are isolated — Nginx (`:443`) is not restricted |
 
-## Contribution guidelines
-
-1. Create a focused branch for each change.
-2. Keep machine addresses, DNS records, and Nginx upstream targets consistent when changing the topology.
-3. Test DNS resolution and backend connectivity before submitting a change.
-4. Validate Nginx configuration with `nginx -t` when modifying proxy or TLS settings.
-5. Document any new hostname, port, environment requirement, or machine responsibility in this README.
+---
 
 ## License
 
-This project is intended for academic and educational use.
+Academic and educational use — Rishihood University, Computer Networks Course.
