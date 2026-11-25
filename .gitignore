@@ -1,0 +1,6 @@
+/firewall/backups/
+/nginx/ssl/ca.key
+/nginx/ssl/ca.srl
+/nginx/logs/
+.DS_Store
+cn-project/

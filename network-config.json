@@ -1,0 +1,42 @@
+{
+  "domain": "team1.test",
+  "dns": {
+    "ttl": 30,
+    "demoPort": 53,
+    "devPort": 1053
+  },
+  "activeEdge": "m2",
+  "standbyEdge": "m4",
+  "ports": {
+    "backendA": 5001,
+    "backendB": 5002,
+    "http": 80,
+    "https": 443
+  },
+  "machines": {
+    "m1": {
+      "name": "Shrestha Gupta",
+      "alias": "shrestha",
+      "role": "Primary DNS Server + Test Client",
+      "ip": "10.7.3.54"
+    },
+    "m2": {
+      "name": "Prakhar Shrivastava",
+      "alias": "prakhar",
+      "role": "Primary Edge Reverse Proxy (Nginx + TLS + LB)",
+      "ip": "10.7.2.62"
+    },
+    "m3": {
+      "name": "Soumen Dass",
+      "alias": "soumen",
+      "role": "Backend Server B + Backup DNS Server",
+      "ip": "10.7.24.85"
+    },
+    "m4": {
+      "name": "Rishav Devan",
+      "alias": "rishav",
+      "role": "Backend Server A + Standby Edge + Test Client",
+      "ip": "10.7.26.82"
+    }
+  }
+}
